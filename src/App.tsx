@@ -1,6 +1,7 @@
 import { useState, useEffect, FormEvent } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import confetti from "canvas-confetti";
+import QRCode from "qrcode";
 import {
   CATEGORIES,
   QUESTIONS,
@@ -36,6 +37,13 @@ import {
   Eye,
   Trash2,
   Users,
+  Send,
+  MessageSquare,
+  Share2,
+  Globe,
+  RefreshCw,
+  Copy,
+  CheckCircle,
 } from "lucide-react";
 
 // Types for players in digital companion
@@ -90,6 +98,7 @@ export default function App() {
   const [playerBets, setPlayerBets] = useState<Record<string, number>>({});
   const [playerScores, setPlayerScores] = useState<Record<string, boolean>>({});
   const [gameLogs, setGameLogs] = useState<GameLog[]>([]);
+  const [openBookBonusPlayer, setOpenBookBonusPlayer] = useState<{ name: string; emoji: string } | null>(null);
 
   // Card list filter
   const [selectedCardCategory, setSelectedCardCategory] = useState<string>("all");
@@ -104,6 +113,307 @@ export default function App() {
   });
   const [newCustomCardText, setNewCustomCardText] = useState("");
   const [newCustomCardCategory, setNewCustomCardCategory] = useState("zlate_vzpominky");
+
+  // Save/Load Session States
+  const [gameCode, setGameCode] = useState<string>("");
+  const [inputCode, setInputCode] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [isLoadingGame, setIsLoadingGame] = useState(false);
+  const [loadError, setLoadError] = useState("");
+
+  // Real-time Multiplayer & Chat States
+  const [isOnlineSync, setIsOnlineSync] = useState(false);
+  const [syncTrigger, setSyncTrigger] = useState(0);
+  const [chatMessages, setChatMessages] = useState<any[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [selectedFunIcon, setSelectedFunIcon] = useState("🚗");
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState("");
+  const [linkCopied, setLinkCopied] = useState(false);
+
+  // Helper to trigger state replication to the server
+  const triggerOnlineSync = () => {
+    setSyncTrigger((prev) => prev + 1);
+  };
+
+  // Replicate state to server whenever local sync trigger is bumped
+  useEffect(() => {
+    if (syncTrigger > 0 && gameCode && isOnlineSync) {
+      pushLocalState();
+    }
+  }, [syncTrigger]);
+
+  // Generate QR code dynamically when gameCode changes
+  useEffect(() => {
+    if (gameCode) {
+      const shareUrl = `${window.location.origin}/?code=${gameCode}`;
+      QRCode.toDataURL(shareUrl, { margin: 1, scale: 5 })
+        .then((url) => {
+          setQrCodeDataUrl(url);
+        })
+        .catch((err) => {
+          console.error("Chyba při generování QR kódu:", err);
+        });
+    } else {
+      setQrCodeDataUrl("");
+    }
+  }, [gameCode]);
+
+  // Read URL query parameter for automatic game load/sync on scanned link
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const codeParam = params.get("code");
+    if (codeParam && codeParam.length === 6) {
+      const codeUpper = codeParam.toUpperCase();
+      setInputCode(codeUpper);
+      // Run load
+      handleLoadGame(codeUpper);
+      setIsOnlineSync(true); // Auto-enable real-time sync
+    }
+  }, []);
+
+  // Sync state pushing helper
+  const pushLocalState = async (
+    currentPlayers = players,
+    currentGameState = gameState,
+    currentActiveIndex = activePlayerIndex,
+    currentCategory = selectedCategory,
+    currentQuestionText = currentQuestion,
+    currentUsed = usedQuestions,
+    currentBets = playerBets,
+    currentScores = playerScores,
+    currentLogs = gameLogs,
+    currentCustom = customCards
+  ) => {
+    if (!gameCode || !isOnlineSync) return;
+    try {
+      const gameStatePayload = {
+        players: currentPlayers,
+        activePlayerIndex: currentActiveIndex,
+        gameState: currentGameState,
+        selectedCategory: currentCategory,
+        currentQuestion: currentQuestionText,
+        usedQuestions: currentUsed,
+        playerBets: currentBets,
+        playerScores: currentScores,
+        gameLogs: currentLogs,
+        customCards: currentCustom,
+      };
+
+      await fetch("/api/save-session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          state: gameStatePayload,
+          code: gameCode,
+        }),
+      });
+    } catch (err) {
+      console.error("Chyba při odesílání herního stavu:", err);
+    }
+  };
+
+  // Real-time synchronization polling (every 2 seconds)
+  useEffect(() => {
+    if (!gameCode || !isOnlineSync) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const response = await fetch(`/api/session-sync/${gameCode}`);
+        const data = await response.json();
+        if (data.success) {
+          // If state exists on backend, merge it gently with local states if they differ
+          if (data.gameState) {
+            const s = data.gameState;
+            if (JSON.stringify(s.players) !== JSON.stringify(players)) {
+              setPlayers(s.players);
+            }
+            if (s.activePlayerIndex !== undefined && s.activePlayerIndex !== activePlayerIndex) {
+              setActivePlayerIndex(s.activePlayerIndex);
+            }
+            if (s.gameState !== undefined && s.gameState !== gameState) {
+              setGameState(s.gameState);
+            }
+            if (JSON.stringify(s.selectedCategory) !== JSON.stringify(selectedCategory)) {
+              setSelectedCategory(s.selectedCategory);
+            }
+            if (s.currentQuestion !== undefined && s.currentQuestion !== currentQuestion) {
+              setCurrentQuestion(s.currentQuestion);
+            }
+            if (JSON.stringify(s.usedQuestions) !== JSON.stringify(usedQuestions)) {
+              setUsedQuestions(s.usedQuestions);
+            }
+            if (JSON.stringify(s.playerBets) !== JSON.stringify(playerBets)) {
+              setPlayerBets(s.playerBets);
+            }
+            if (JSON.stringify(s.playerScores) !== JSON.stringify(playerScores)) {
+              setPlayerScores(s.playerScores);
+            }
+            if (JSON.stringify(s.gameLogs) !== JSON.stringify(gameLogs)) {
+              setGameLogs(s.gameLogs);
+            }
+            if (JSON.stringify(s.customCards) !== JSON.stringify(customCards)) {
+              setCustomCards(s.customCards);
+            }
+          }
+
+          // Merge chat history
+          if (data.chat) {
+            setChatMessages(data.chat);
+          }
+        }
+      } catch (err) {
+        console.error("Error during background session sync:", err);
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [
+    gameCode,
+    isOnlineSync,
+    players,
+    activePlayerIndex,
+    gameState,
+    selectedCategory,
+    currentQuestion,
+    usedQuestions,
+    playerBets,
+    playerScores,
+    gameLogs,
+    customCards,
+  ]);
+
+  const handleSendChatMessage = async (presetText?: string) => {
+    const textToSend = presetText || chatInput;
+    if (!textToSend.trim() || !gameCode) return;
+
+    try {
+      const response = await fetch("/api/chat/send", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          code: gameCode,
+          sender: players[activePlayerIndex]?.name || "Neznámý",
+          text: textToSend.trim(),
+          icon: selectedFunIcon || "💬",
+        }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        setChatMessages(data.chat);
+        if (!presetText) {
+          setChatInput("");
+        }
+      }
+    } catch (err) {
+      console.error("Error sending chat message:", err);
+    }
+  };
+
+  const handleCopyShareLink = () => {
+    if (!gameCode) return;
+    const shareUrl = `${window.location.origin}/?code=${gameCode}`;
+    navigator.clipboard.writeText(shareUrl)
+      .then(() => {
+        setLinkCopied(true);
+        setTimeout(() => setLinkCopied(false), 2000);
+      })
+      .catch((err) => console.error("Could not copy link", err));
+  };
+
+  const handleSaveGame = async () => {
+    setIsSaving(true);
+    setSaveError("");
+    setSaveSuccess(false);
+    try {
+      const gameStatePayload = {
+        players,
+        activePlayerIndex,
+        gameState,
+        selectedCategory,
+        currentQuestion,
+        usedQuestions,
+        playerBets,
+        playerScores,
+        gameLogs,
+        customCards,
+      };
+
+      const response = await fetch("/api/save-session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          state: gameStatePayload,
+          code: gameCode || undefined,
+        }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setGameCode(data.code);
+        setSaveSuccess(true);
+        setIsOnlineSync(true); // Enable real-time sync automatically
+        addLog(`Hra byla úspěšně uložena pod kódem: ${data.code}`);
+        playSynthesizedSound("fanfare");
+      } else {
+        throw new Error(data.error || "Chyba při ukládání seance");
+      }
+    } catch (err: any) {
+      console.error(err);
+      setSaveError("Nepodařilo se uložit hru. Zkuste to prosím znovu.");
+      playSynthesizedSound("lose");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleLoadGame = async (codeToLoad: string) => {
+    if (!codeToLoad.trim()) return;
+    setIsLoadingGame(true);
+    setLoadError("");
+    try {
+      const response = await fetch(`/api/load-session/${codeToLoad.trim().toUpperCase()}`);
+      const data = await response.json();
+      if (data.success && data.state) {
+        const s = data.state;
+        if (s.players) setPlayers(s.players);
+        if (s.activePlayerIndex !== undefined) setActivePlayerIndex(s.activePlayerIndex);
+        if (s.gameState) setGameState(s.gameState);
+        if (s.selectedCategory !== undefined) setSelectedCategory(s.selectedCategory);
+        if (s.currentQuestion !== undefined) setCurrentQuestion(s.currentQuestion);
+        if (s.usedQuestions) setUsedQuestions(s.usedQuestions);
+        if (s.playerBets) setPlayerBets(s.playerBets);
+        if (s.playerScores) setPlayerScores(s.playerScores);
+        if (s.gameLogs) setGameLogs(s.gameLogs);
+        if (s.customCards) setCustomCards(s.customCards);
+
+        if (data.chat) {
+          setChatMessages(data.chat);
+        }
+
+        setGameCode(codeToLoad.trim().toUpperCase());
+        setIsOnlineSync(true); // Enable real-time sync automatically
+        addLog(`Hra byla úspěšně načtena z kódu: ${codeToLoad.trim().toUpperCase()}`);
+        playSynthesizedSound("fanfare");
+        setInputCode("");
+      } else {
+        throw new Error(data.error || "Kód nebyl nalezen nebo je neplatný.");
+      }
+    } catch (err: any) {
+      console.error(err);
+      setLoadError(err instanceof Error ? err.message : "Chyba při načítání seance. Zkontrolujte kód.");
+      playSynthesizedSound("lose");
+    } finally {
+      setIsLoadingGame(false);
+    }
+  };
 
   // Load state or logs on start
   useEffect(() => {
@@ -185,11 +495,23 @@ export default function App() {
       emoji: newPlayerEmoji,
       tokens: 10,
     };
-    setPlayers((prev) => [...prev, player]);
-    addLog(`Hráč ${player.emoji} ${player.name} se připojil do hry se 10 žetony.`);
+    const updatedPlayers = [...players, player];
+    setPlayers(updatedPlayers);
+    
+    const newLogItem = {
+      id: Math.random().toString(),
+      text: `Hráč ${player.emoji} ${player.name} se připojil do hry se 10 žetony.`,
+      timestamp: new Date().toLocaleTimeString("cs-CZ", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+    };
+    const updatedLogs = [newLogItem, ...gameLogs];
+    setGameLogs(updatedLogs);
+
     setNewPlayerName("");
     setNewPlayerAge("");
     playSynthesizedSound("click");
+
+    // Replicate state online
+    pushLocalState(updatedPlayers, gameState, activePlayerIndex, selectedCategory, currentQuestion, usedQuestions, playerBets, playerScores, updatedLogs);
   };
 
   const handleRemovePlayer = (id: string) => {
@@ -198,17 +520,30 @@ export default function App() {
       return;
     }
     const removed = players.find((p) => p.id === id);
-    setPlayers((prev) => prev.filter((p) => p.id !== id));
+    const updatedPlayers = players.filter((p) => p.id !== id);
+    setPlayers(updatedPlayers);
+
+    let updatedLogs = gameLogs;
     if (removed) {
-      addLog(`Hráč ${removed.emoji} ${removed.name} opustil hru.`);
+      const newLogItem = {
+        id: Math.random().toString(),
+        text: `Hráč ${removed.emoji} ${removed.name} opustil hru.`,
+        timestamp: new Date().toLocaleTimeString("cs-CZ", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+      };
+      updatedLogs = [newLogItem, ...gameLogs];
+      setGameLogs(updatedLogs);
     }
     playSynthesizedSound("click");
+
+    // Replicate state online
+    pushLocalState(updatedPlayers, gameState, activePlayerIndex, selectedCategory, currentQuestion, usedQuestions, playerBets, playerScores, updatedLogs);
   };
 
   // Trigger spinning state
   const handleStartSpin = () => {
     setGameState("spinning");
     playSynthesizedSound("click");
+    pushLocalState(players, "spinning");
   };
 
   // Handle spin completion and draw a card
@@ -259,11 +594,13 @@ export default function App() {
     setPlayerScores(initialScores);
 
     addLog(`Ruleta vylosovala téma: ${category.title}. Aktivní hráč: ${activePlayer.emoji} ${activePlayer.name}.`);
+    triggerOnlineSync();
   };
 
   const handleRevealConfirm = () => {
     setGameState("betting");
     playSynthesizedSound("click");
+    triggerOnlineSync();
   };
 
   const handleBetAdjust = (playerId: string, increment: boolean) => {
@@ -279,11 +616,13 @@ export default function App() {
 
     setPlayerBets((prev) => ({ ...prev, [playerId]: newBet }));
     playSynthesizedSound("click");
+    triggerOnlineSync();
   };
 
   const togglePlayerScore = (playerId: string) => {
     setPlayerScores((prev) => ({ ...prev, [playerId]: !prev[playerId] }));
     playSynthesizedSound("click");
+    triggerOnlineSync();
   };
 
   // Process bets and distribute tokens
@@ -318,11 +657,13 @@ export default function App() {
     const guessersCount = players.length - 1;
     let bonusText = "";
     let activePlayerEarned = 0;
+    let isOtevrenaKniha = false;
 
     if (totalGuessedRight === guessersCount && guessersCount > 0) {
       activePlayerBonus = 2;
       activePlayerEarned = 2;
       bonusText = ` 🎉 ${activePlayer.emoji} ${activePlayer.name} získává bonus +2 žetony za to, že je "otevřenou knihou"!`;
+      isOtevrenaKniha = true;
     }
 
     // Apply active player tokens
@@ -349,16 +690,27 @@ export default function App() {
     addLog(logSummary);
 
     // Play appropriate sounds & confetti
-    if (totalGuessedRight > 0) {
-      playSynthesizedSound("fanfare");
+    if (isOtevrenaKniha) {
+      setOpenBookBonusPlayer({ name: activePlayer.name, emoji: activePlayer.emoji });
+      confetti({
+        particleCount: 150,
+        spread: 80,
+        origin: { y: 0.6 }
+      });
+      playSynthesizedSound("win");
     } else {
-      playSynthesizedSound("lose");
+      if (totalGuessedRight > 0) {
+        playSynthesizedSound("fanfare");
+      } else {
+        playSynthesizedSound("lose");
+      }
     }
 
     // Move to next player's turn
     const nextPlayerIndex = (activePlayerIndex + 1) % players.length;
     setActivePlayerIndex(nextPlayerIndex);
     setGameState("turn_selection");
+    triggerOnlineSync();
   };
 
   const handleResetGame = () => {
@@ -382,6 +734,7 @@ export default function App() {
       setGameLogs([]);
       addLog("Hra byla restartována. Všichni začínají s 10 žetony.");
       playSynthesizedSound("win");
+      triggerOnlineSync();
     }
   };
 
@@ -404,6 +757,7 @@ export default function App() {
     addLog(`Přidána nová vlastní karta do kategorie "${CATEGORIES.find((c) => c.id === newCustomCardCategory)?.title}": "${newCustomCardText}"`);
     setNewCustomCardText("");
     playSynthesizedSound("click");
+    triggerOnlineSync();
   };
 
   const handleRemoveCustomCard = (categoryKey: string, cardText: string) => {
@@ -413,6 +767,7 @@ export default function App() {
     }));
     addLog(`Odstraněna vlastní karta: "${cardText}"`);
     playSynthesizedSound("click");
+    triggerOnlineSync();
   };
 
   const getCategoryIcon = (iconName: string) => {
@@ -528,9 +883,9 @@ export default function App() {
       </header>
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 no-print">
+      <main className={`flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 ${activeTab !== "print" ? "no-print" : ""}`}>
         {/* Mobile View Navigation Tab Helper */}
-        <div className="md:hidden flex overflow-x-auto pb-3 mb-4 gap-2 no-scrollbar border-b border-slate-200">
+        <div className="md:hidden flex overflow-x-auto pb-3 mb-4 gap-2 no-scrollbar border-b border-slate-200 no-print">
           <button
             onClick={() => setActiveTab("game")}
             className={`flex-shrink-0 px-3.5 py-2 rounded-xl text-xs font-bold ${
@@ -727,13 +1082,293 @@ export default function App() {
                     <p className="text-[11px] text-slate-400 text-center py-8">Zatím se nic nestalo. Začněte točit!</p>
                   ) : (
                     gameLogs.map((log) => (
-                      <div key={log.id} className="text-[10px] leading-relaxed border-b border-slate-100/60 pb-1.5 last:border-0">
-                        <span className="font-mono text-slate-400 font-bold mr-1.5">[{log.timestamp}]</span>
+                      <div key={log.id} className="text-[10px] leading-relaxed border-b border-slate-100/60 pb-1.5 last:border-0 flex gap-1.5">
+                        <span className="font-mono text-slate-400 font-bold shrink-0">[{log.timestamp}]</span>
                         <span className="text-slate-600 font-medium">{log.text}</span>
                       </div>
                     ))
                   )}
                 </div>
+              </div>
+
+              {/* Save, Online Sync & QR Code Sharing Card */}
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-display font-bold text-slate-900 flex items-center gap-2 text-sm">
+                    <Globe className="w-4.5 h-4.5 text-indigo-500 animate-spin" style={{ animationDuration: '8s' }} />
+                    <span>Hra Online & Sdílení</span>
+                  </h3>
+                  {gameCode && isOnlineSync && (
+                    <span className="flex items-center gap-1.5 text-[9px] bg-emerald-500 text-white font-bold px-2 py-0.5 rounded-full animate-pulse">
+                      <span className="w-1.5 h-1.5 rounded-full bg-white block"></span>
+                      ONLINE SYNC
+                    </span>
+                  )}
+                </div>
+                
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  Propojte rodinu na více zařízeních současně. Změny stavu u jednoho hráče se ihned projeví u ostatních!
+                </p>
+
+                {/* Generate / Status Section */}
+                <div className="space-y-3">
+                  {!gameCode ? (
+                    <button
+                      onClick={handleSaveGame}
+                      disabled={isSaving}
+                      className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-indigo-500 to-indigo-600 hover:from-indigo-600 hover:to-indigo-700 text-white font-bold py-2.5 px-4 rounded-xl text-xs shadow-md transition-all disabled:opacity-50 cursor-pointer active:scale-[0.98]"
+                    >
+                      {isSaving ? "⏳ Vytvářím online pokoj..." : "🌐 Vygenerovat kód a hrát online"}
+                    </button>
+                  ) : (
+                    <div className="space-y-3">
+                      {/* Room Details Block */}
+                      <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3.5 space-y-2">
+                        <div className="flex justify-between items-center">
+                          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+                            Kód pokoje
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider flex items-center gap-1">
+                            <span className={`w-1.5 h-1.5 rounded-full ${isOnlineSync ? 'bg-emerald-500' : 'bg-slate-400'}`}></span>
+                            {isOnlineSync ? 'Synchro aktivní' : 'Vypnuto'}
+                          </span>
+                        </div>
+                        
+                        <div className="flex items-center justify-between bg-white px-3 py-2 rounded-lg border border-slate-200">
+                          <span className="text-xl font-mono font-black text-slate-800 tracking-wider">
+                            {gameCode}
+                          </span>
+                          <button
+                            onClick={handleCopyShareLink}
+                            className="flex items-center gap-1 text-[10px] bg-slate-100 hover:bg-indigo-50 text-slate-600 hover:text-indigo-600 px-2 py-1 rounded-md transition-all font-semibold"
+                          >
+                            {linkCopied ? (
+                              <>
+                                <CheckCircle className="w-3 h-3 text-emerald-500" />
+                                <span>Zkopírováno!</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3 h-3" />
+                                <span>Kopírovat odkaz</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Interactive toggle of synchronization */}
+                        <div className="flex items-center justify-between pt-1">
+                          <label className="text-[10px] font-bold text-slate-600 cursor-pointer select-none flex items-center gap-1.5">
+                            <input
+                              type="checkbox"
+                              checked={isOnlineSync}
+                              onChange={(e) => setIsOnlineSync(e.target.checked)}
+                              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5"
+                            />
+                            Režim reálného času
+                          </label>
+                          <button
+                            onClick={() => {
+                              handleSaveGame();
+                              addLog("Ruční uložení stavu vyvoláno.");
+                            }}
+                            className="text-[9px] text-slate-400 hover:text-slate-600 flex items-center gap-1"
+                            title="Vynutit okamžité uložení stavu"
+                          >
+                            <RefreshCw className="w-2.5 h-2.5" />
+                            Uložit teď
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Share QR Code Section */}
+                      {qrCodeDataUrl && (
+                        <div className="bg-indigo-50/50 border border-indigo-100 rounded-xl p-3 flex items-center gap-3">
+                          <div className="bg-white p-1 rounded-lg border border-indigo-100 shadow-sm shrink-0">
+                            <img
+                              src={qrCodeDataUrl}
+                              alt="Herní QR Kód"
+                              className="w-16 h-16 object-contain"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-[10px] font-bold text-indigo-900 block uppercase tracking-wide">
+                              Naskenuj mobilním foťákem
+                            </span>
+                            <p className="text-[10px] text-slate-500 leading-tight">
+                              Naskenujte QR kód druhým mobilem/tabletem a okamžitě se připojíte do stejné hry!
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {saveError && (
+                    <p className="text-[10px] text-rose-600 font-medium bg-rose-50 p-2.5 rounded-lg border border-rose-100 flex items-center gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                      {saveError}
+                    </p>
+                  )}
+                </div>
+
+                {/* Load Section */}
+                <div className="border-t border-slate-100 pt-3.5 space-y-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                    Připojit se k jiné hře
+                  </span>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      placeholder="Zadejte kód pokoje"
+                      value={inputCode}
+                      onChange={(e) => setInputCode(e.target.value.toUpperCase().slice(0, 6))}
+                      maxLength={6}
+                      className="text-center font-mono font-bold tracking-widest text-xs border border-slate-200 p-2 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400 bg-slate-50/50 flex-1 uppercase"
+                    />
+                    <button
+                      onClick={() => handleLoadGame(inputCode)}
+                      disabled={isLoadingGame || inputCode.length < 6}
+                      className="bg-slate-800 hover:bg-slate-900 text-white font-bold px-3.5 rounded-xl text-xs transition-all disabled:opacity-40 cursor-pointer flex items-center justify-center"
+                    >
+                      {isLoadingGame ? "..." : "Připojit"}
+                    </button>
+                  </div>
+
+                  {loadError && (
+                    <p className="text-[10px] text-rose-600 font-medium bg-rose-50 p-2.5 rounded-lg border border-rose-100 flex items-center gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                      {loadError}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Rodinný Chat Card */}
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4 no-print">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-display font-bold text-slate-900 flex items-center gap-2 text-sm">
+                    <MessageSquare className="w-4.5 h-4.5 text-indigo-500" />
+                    <span>Rodinný Chat & Reakce</span>
+                  </h3>
+                  {gameCode && (
+                    <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 font-bold rounded-md">
+                      {chatMessages.length} zpráv
+                    </span>
+                  )}
+                </div>
+
+                {!gameCode ? (
+                  <div className="bg-slate-50 rounded-xl p-4 text-center border border-slate-100">
+                    <span className="text-xl block mb-1">🤫</span>
+                    <p className="text-[10px] text-slate-400 leading-normal">
+                      Chat a legrační reakce se zpřístupní, jakmile vygenerujete online kód výše.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {/* Chat Messages Log */}
+                    <div className="h-[180px] overflow-y-auto space-y-2.5 border border-slate-100 rounded-xl p-3 bg-slate-50/50 flex flex-col-reverse">
+                      {chatMessages.length === 0 ? (
+                        <p className="text-[10px] text-slate-400 text-center py-10 my-auto">
+                          Zatím žádné zprávy. Napište něco nebo klikněte na rychlou reakci níže! 👇
+                        </p>
+                      ) : (
+                        [...chatMessages].reverse().map((msg) => (
+                          <div key={msg.id} className="text-xs leading-relaxed border-b border-slate-100/40 pb-1.5 last:border-0">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="font-bold text-indigo-900 flex items-center gap-1 text-[11px]">
+                                <span>{msg.icon}</span>
+                                <span>{msg.sender}</span>
+                              </span>
+                              <span className="text-[9px] font-mono text-slate-400">
+                                {msg.timestamp}
+                              </span>
+                            </div>
+                            <p className="text-slate-600 bg-white/70 px-2 py-1 rounded-md border border-slate-100/50 break-words mt-0.5 text-[11px]">
+                              {msg.text}
+                            </p>
+                          </div>
+                        ))
+                      )}
+                    </div>
+
+                    {/* Quick Reactions Grid */}
+                    <div className="space-y-1">
+                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block">
+                        Rychlé reakce (Jedno kliknutí):
+                      </span>
+                      <div className="grid grid-cols-5 gap-1.5">
+                        {["🚗 Auto jízda!", "🎲 Zatočte!", "🏆 Vyhrávám!", "🌟 Super!", "🎉 Jupíí!", "🤐 Pst!", "🤪 Legrace!", "💡 Vím to!", "🍿 Napínavé!", "🥳 Sláva!"].map((reaction, idx) => {
+                          const emoji = reaction.split(" ")[0];
+                          return (
+                            <button
+                              key={idx}
+                              onClick={() => {
+                                handleSendChatMessage(reaction);
+                                playSynthesizedSound("click");
+                              }}
+                              className="text-[10px] bg-slate-50 hover:bg-indigo-50 border border-slate-200 rounded-lg p-1.5 transition-all text-center cursor-pointer select-none active:scale-95 text-slate-700"
+                              title={reaction}
+                            >
+                              <span className="text-xs block">{emoji}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Chat Text Input */}
+                    <div className="space-y-2 pt-1 border-t border-slate-100">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase">Ikona:</span>
+                        <div className="flex gap-1 overflow-x-auto no-scrollbar py-0.5">
+                          {["🚗", "🎲", "🏆", "🌟", "🎉", "💬", "🤫", "🤪", "💡", "🥳", "🧸", "🍕"].map((emoji) => (
+                            <button
+                              key={emoji}
+                              type="button"
+                              onClick={() => {
+                                setSelectedFunIcon(emoji);
+                                playSynthesizedSound("click");
+                              }}
+                              className={`w-5.5 h-5.5 text-xs rounded flex items-center justify-center shrink-0 border transition-all ${
+                                selectedFunIcon === emoji ? 'bg-indigo-50 border-indigo-400 text-indigo-700 scale-110' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'
+                              }`}
+                            >
+                              {emoji}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="flex gap-1.5">
+                        <input
+                          type="text"
+                          placeholder="Napište vzkaz..."
+                          value={chatInput}
+                          onChange={(e) => setChatInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              handleSendChatMessage();
+                              playSynthesizedSound("click");
+                            }
+                          }}
+                          className="text-xs border border-slate-200 px-3 py-2 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-400 bg-slate-50/50 flex-1"
+                        />
+                        <button
+                          onClick={() => {
+                            handleSendChatMessage();
+                            playSynthesizedSound("click");
+                          }}
+                          disabled={!chatInput.trim()}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white p-2 rounded-xl transition-all disabled:opacity-40 cursor-pointer shrink-0 flex items-center justify-center w-8 h-8"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
             </div>
@@ -1275,6 +1910,193 @@ export default function App() {
           </div>
         </div>
       </footer>
+
+      {/* "Otevřená kniha" Bonus Celebration Overlay */}
+      <AnimatePresence>
+        {openBookBonusPlayer && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/85 backdrop-blur-md no-print"
+          >
+            {/* Background radial glow */}
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(245,158,11,0.15)_0%,transparent_70%)] pointer-events-none" />
+
+            <motion.div
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ 
+                scale: 1, 
+                y: 0,
+                transition: { type: "spring", damping: 15, stiffness: 100 }
+              }}
+              exit={{ scale: 0.95, y: 10 }}
+              className="relative max-w-md w-full bg-slate-900 border border-amber-500/30 text-white rounded-3xl p-8 text-center shadow-2xl overflow-hidden"
+            >
+              {/* Animated glowing top border */}
+              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-amber-400 to-transparent animate-pulse" />
+
+              {/* Decorative sparkles using Framer Motion */}
+              <div className="absolute inset-0 pointer-events-none overflow-hidden">
+                {[...Array(12)].map((_, i) => {
+                  const xVal = Math.floor(Math.random() * 100);
+                  const yVal = Math.floor(Math.random() * 100);
+                  const duration = Math.random() * 2 + 1.5;
+                  const delay = Math.random() * 0.5;
+                  const scaleMax = Math.random() * 1.5 + 0.5;
+                  return (
+                    <motion.div
+                      key={i}
+                      className="absolute text-amber-300"
+                      initial={{ 
+                        x: "50%", 
+                        y: "50%", 
+                        opacity: 0, 
+                        scale: 0 
+                      }}
+                      animate={{ 
+                        x: `${xVal}%`, 
+                        y: `${yVal}%`, 
+                        opacity: [0, 0.8, 0],
+                        scale: [0, scaleMax, 0],
+                      }}
+                      transition={{ 
+                        duration, 
+                        repeat: Infinity,
+                        delay
+                      }}
+                    >
+                      ✨
+                    </motion.div>
+                  );
+                })}
+              </div>
+
+              {/* Floating animated Book Open and Coin Container */}
+              <div className="relative h-32 flex items-center justify-center mb-6">
+                {/* Animated Gold Aura */}
+                <motion.div
+                  className="absolute w-24 h-24 rounded-full bg-amber-500/20 blur-xl"
+                  animate={{
+                    scale: [1, 1.3, 1],
+                    opacity: [0.5, 0.8, 0.5],
+                  }}
+                  transition={{
+                    duration: 2.5,
+                    repeat: Infinity,
+                    ease: "easeInOut"
+                  }}
+                />
+
+                {/* Glowing expanding circle */}
+                <div className="absolute w-20 h-20 rounded-full border border-amber-400/20 animate-ping opacity-30" />
+
+                {/* Book Open Icon with 3D-like flip/pulse */}
+                <motion.div
+                  className="z-10 p-5 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-600 shadow-lg shadow-amber-500/20 text-slate-950"
+                  animate={{
+                    y: [0, -10, 0],
+                    rotateY: [0, 10, -10, 0],
+                    scale: [1, 1.05, 1],
+                  }}
+                  transition={{
+                    duration: 4,
+                    repeat: Infinity,
+                    ease: "easeInOut"
+                  }}
+                >
+                  <BookOpen className="w-12 h-12 stroke-[2.5]" />
+                </motion.div>
+
+                {/* Floating score gains "+2" */}
+                <motion.div
+                  className="absolute text-emerald-400 font-display font-extrabold text-3xl tracking-tight filter drop-shadow-[0_2px_8px_rgba(16,185,129,0.4)]"
+                  initial={{ opacity: 0, y: 10, scale: 0.5 }}
+                  animate={{ 
+                    opacity: [0, 1, 1, 0], 
+                    y: [-10, -55, -65],
+                    scale: [0.5, 1.4, 1.2, 0.8] 
+                  }}
+                  transition={{ 
+                    duration: 2.5, 
+                    repeat: Infinity,
+                    ease: "easeOut"
+                  }}
+                >
+                  +2 🪙
+                </motion.div>
+                
+                {/* Left floating coin */}
+                <motion.div
+                  className="absolute text-2xl"
+                  initial={{ opacity: 0, x: -30, y: 20 }}
+                  animate={{ 
+                    opacity: [0, 1, 0], 
+                    y: [20, -40, -50],
+                    x: [-30, -50, -60],
+                    rotate: [0, 360]
+                  }}
+                  transition={{ 
+                    duration: 2.2, 
+                    repeat: Infinity,
+                    delay: 0.4,
+                    ease: "easeOut"
+                  }}
+                >
+                  🪙
+                </motion.div>
+
+                {/* Right floating coin */}
+                <motion.div
+                  className="absolute text-2xl"
+                  initial={{ opacity: 0, x: 30, y: 20 }}
+                  animate={{ 
+                    opacity: [0, 1, 0], 
+                    y: [20, -45, -55],
+                    x: [30, 50, 60],
+                    rotate: [0, -360]
+                  }}
+                  transition={{ 
+                    duration: 2, 
+                    repeat: Infinity,
+                    delay: 0.8,
+                    ease: "easeOut"
+                  }}
+                >
+                  🪙
+                </motion.div>
+              </div>
+
+              {/* Category-themed header badge */}
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-400/30 text-amber-400 text-[10px] font-bold uppercase tracking-widest mb-3">
+                ✨ Výjimečný Bonus Hry
+              </span>
+
+              {/* Title */}
+              <h2 className="font-display font-black text-2xl text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-amber-400 to-amber-200 tracking-tight leading-tight mb-3">
+                OTEVŘENÁ KNIHA!
+              </h2>
+
+              {/* Description body */}
+              <p className="text-xs text-slate-300 leading-relaxed max-w-sm mx-auto mb-6">
+                <span className="text-xl mr-1.5 inline-block animate-bounce">{openBookBonusPlayer.emoji}</span>
+                <strong className="text-white font-bold">{openBookBonusPlayer.name}</strong> je pro vaši rodinu naprosto otevřenou knihou! Všichni hádající uhodli jeho tajný tip. Aktivní hráč za toto perfektní sblížení získává <strong>2 bonusové žetony</strong> z banku.
+              </p>
+
+              {/* Dismiss Button */}
+              <button
+                onClick={() => {
+                  setOpenBookBonusPlayer(null);
+                  playSynthesizedSound("click");
+                }}
+                className="w-full bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 hover:from-amber-500 hover:to-amber-700 text-slate-950 font-display font-black text-xs py-3.5 px-6 rounded-2xl shadow-lg shadow-amber-500/20 hover:shadow-amber-500/30 active:scale-[0.98] transition-all uppercase tracking-wider cursor-pointer"
+              >
+                Pokračovat ve hře ➔
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
